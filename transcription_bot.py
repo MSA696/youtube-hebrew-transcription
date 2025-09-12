@@ -1,7 +1,8 @@
+#!/usr/bin/env python3
 """
-YouTube Hebrew Transcription Bot for Cloud Deployment
-Transcribes Hebrew audio from YouTube Shorts to Google Docs
-Runs on GitHub Actions (free) with Google Cloud services
+YouTube Hebrew Transcription Bot
+Checks for new YouTube Shorts, transcribes to Hebrew, saves to document
+Uses only free/low-cost services
 """
 
 import os
@@ -11,128 +12,55 @@ import whisper
 import yt_dlp
 from datetime import datetime, timedelta
 from pathlib import Path
-import tempfile
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-import base64
+import schedule
+import time
 
 # Configuration
-YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
-CHANNEL_ID = os.getenv('CHANNEL_ID', "YOUR_CHANNEL_ID_HERE")
-GOOGLE_DOC_ID = os.getenv('GOOGLE_DOC_ID', "YOUR_GOOGLE_DOC_ID_HERE")
-GOOGLE_CREDENTIALS_B64 = os.getenv('GOOGLE_CREDENTIALS_B64')  # Base64 encoded service account JSON
-MAX_DURATION = 180
-LAST_CHECK_GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
-GITHUB_REPO = os.getenv('GITHUB_REPOSITORY', 'username/repo')
+YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')  # Get free key from Google Cloud Console
+CHANNEL_ID = "YOUR_CHANNEL_ID_HERE"  # Replace with target channel ID
+OUTPUT_FILE = "transcriptions.txt"
+LAST_CHECK_FILE = "last_check.json"
+MAX_DURATION = 60  # Only process videos under 60 seconds
 
-class CloudYouTubeTranscriptionBot:
+class YouTubeTranscriptionBot:
     def __init__(self):
         self.whisper_model = None
-        self.docs_service = None
         self.load_whisper_model()
-        self.setup_google_docs()
         
     def load_whisper_model(self):
-        """Load Whisper model for Hebrew transcription"""
+        """Load Whisper model (free, runs locally)"""
         try:
             print("Loading Whisper model...")
-            # Use 'tiny' model for faster processing in cloud environment
-            self.whisper_model = whisper.load_model("tiny")
+            self.whisper_model = whisper.load_model("base")  # Use 'tiny' for faster processing
             print("Whisper model loaded successfully")
         except Exception as e:
             print(f"Error loading Whisper model: {e}")
     
-    def setup_google_docs(self):
-        """Setup Google Docs API service"""
+    def get_last_check_time(self):
+        """Get the last time we checked for videos"""
         try:
-            if not GOOGLE_CREDENTIALS_B64:
-                print("Google credentials not found")
-                return
-            
-            # Decode base64 credentials
-            credentials_json = base64.b64decode(GOOGLE_CREDENTIALS_B64).decode('utf-8')
-            credentials_dict = json.loads(credentials_json)
-            
-            # Setup credentials
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://www.googleapis.com/auth/documents']
-            )
-            
-            self.docs_service = build('docs', 'v1', credentials=credentials)
-            print("Google Docs API setup successful")
-            
-        except Exception as e:
-            print(f"Error setting up Google Docs API: {e}")
+            if Path(LAST_CHECK_FILE).exists():
+                with open(LAST_CHECK_FILE, 'r') as f:
+                    data = json.load(f)
+                    return datetime.fromisoformat(data['last_check'])
+        except:
+            pass
+        return datetime.now() - timedelta(days=1)  # Default to yesterday
     
-    def get_last_check_time_from_github(self):
-        """Get last check time from GitHub repository file"""
-        if not LAST_CHECK_GITHUB_TOKEN:
-            return datetime.now() - timedelta(days=1)
-        
-        try:
-            headers = {
-                'Authorization': f'token {LAST_CHECK_GITHUB_TOKEN}',
-                'Accept': 'application/vnd.github.v3+json'
-            }
-            
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/last_check.json"
-            response = requests.get(url, headers=headers)
-            
-            if response.status_code == 200:
-                data = response.json()
-                content = base64.b64decode(data['content']).decode('utf-8')
-                timestamp_data = json.loads(content)
-                return datetime.fromisoformat(timestamp_data['last_check'])
-            
-        except Exception as e:
-            print(f"Error getting last check time: {e}")
-        
-        return datetime.now() - timedelta(days=1)
-    
-    def save_last_check_time_to_github(self):
-        """Save last check time to GitHub repository"""
-        if not LAST_CHECK_GITHUB_TOKEN:
-            return
-        
-        try:
-            headers = {
-                'Authorization': f'token {LAST_CHECK_GITHUB_TOKEN}',
-                'Accept': 'application/vnd.github.v3+json'
-            }
-            
-            timestamp_data = {'last_check': datetime.now().isoformat()}
-            content = base64.b64encode(json.dumps(timestamp_data).encode()).decode()
-            
-            # Check if file exists
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/last_check.json"
-            response = requests.get(url, headers=headers)
-            
-            data = {
-                'message': 'Update last check time',
-                'content': content
-            }
-            
-            if response.status_code == 200:
-                # File exists, update it
-                file_data = response.json()
-                data['sha'] = file_data['sha']
-                requests.put(url, headers=headers, json=data)
-            else:
-                # Create new file
-                requests.put(url, headers=headers, json=data)
-                
-        except Exception as e:
-            print(f"Error saving last check time: {e}")
+    def save_last_check_time(self):
+        """Save the current time as last check time"""
+        with open(LAST_CHECK_FILE, 'w') as f:
+            json.dump({'last_check': datetime.now().isoformat()}, f)
     
     def get_recent_videos(self):
-        """Get recent short videos from YouTube channel"""
+        """Get recent videos from YouTube channel using free YouTube API"""
         if not YOUTUBE_API_KEY:
-            print("YouTube API key not found")
+            print("YouTube API key not found. Please set YOUTUBE_API_KEY environment variable")
             return []
         
-        last_check = self.get_last_check_time_from_github()
+        last_check = self.get_last_check_time()
         
+        # YouTube Data API v3 - free tier: 10,000 requests/day
         url = f"https://www.googleapis.com/youtube/v3/search"
         params = {
             'part': 'snippet',
@@ -155,6 +83,7 @@ class CloudYouTubeTranscriptionBot:
                 title = item['snippet']['title']
                 published = item['snippet']['publishedAt']
                 
+                # Check if it's a short video (under 60 seconds)
                 if self.is_short_video(video_id):
                     videos.append({
                         'id': video_id,
@@ -170,7 +99,7 @@ class CloudYouTubeTranscriptionBot:
             return []
     
     def is_short_video(self, video_id):
-        """Check if video is under MAX_DURATION seconds"""
+        """Check if video duration is under MAX_DURATION seconds"""
         url = f"https://www.googleapis.com/youtube/v3/videos"
         params = {
             'part': 'contentDetails',
@@ -184,6 +113,7 @@ class CloudYouTubeTranscriptionBot:
             
             if data.get('items'):
                 duration_str = data['items'][0]['contentDetails']['duration']
+                # Parse ISO 8601 duration (e.g., PT1M30S = 90 seconds)
                 import re
                 match = re.search(r'PT(?:(\d+)M)?(?:(\d+)S)?', duration_str)
                 if match:
@@ -196,14 +126,13 @@ class CloudYouTubeTranscriptionBot:
         except:
             return False
     
-    def download_audio_to_temp(self, video_url):
-        """Download audio to temporary file"""
-        temp_dir = tempfile.mkdtemp()
-        audio_path = os.path.join(temp_dir, 'audio')
-        
+    def download_audio(self, video_url):
+        """Download audio from YouTube video using yt-dlp (free)"""
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': f'{audio_path}.%(ext)s',
+            'outtmpl': 'temp_audio.%(ext)s',
+            'extractaudio': True,
+            'audioformat': 'wav',
             'quiet': True
         }
         
@@ -211,10 +140,10 @@ class CloudYouTubeTranscriptionBot:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
                 
-            # Find downloaded file
-            for ext in ['wav', 'mp3', 'm4a', 'webm', 'mp4']:
-                audio_file = f"{audio_path}.{ext}"
-                if os.path.exists(audio_file):
+            # Find the downloaded file
+            for ext in ['wav', 'mp3', 'm4a', 'webm']:
+                audio_file = f"temp_audio.{ext}"
+                if Path(audio_file).exists():
                     return audio_file
             
             return None
@@ -222,94 +151,75 @@ class CloudYouTubeTranscriptionBot:
             print(f"Error downloading audio: {e}")
             return None
     
-    def transcribe_hebrew_audio(self, audio_file):
-        """Transcribe Hebrew audio using Whisper"""
+    def transcribe_to_hebrew(self, audio_file):
+        """Transcribe audio to Hebrew using Whisper (free, local)"""
         try:
-            # Transcribe with Hebrew language specified
+            # Whisper will auto-detect language and translate to the specified language
             result = self.whisper_model.transcribe(
                 audio_file,
-                language="he",  # Hebrew language code
-                task="transcribe"  # Just transcribe, don't translate
+                task="translate",  # This translates to English first
+                language=None  # Auto-detect
             )
             
-            return result["text"].strip()
+            english_text = result["text"]
+            
+            # Use free translation service (Google Translate via googletrans)
+            try:
+                from googletrans import Translator
+                translator = Translator()
+                hebrew_result = translator.translate(english_text, dest='he')
+                return hebrew_result.text
+            except ImportError:
+                print("googletrans not installed. Install with: pip install googletrans==4.0.0-rc1")
+                return english_text
+            except Exception as e:
+                print(f"Translation error: {e}")
+                return english_text
                 
         except Exception as e:
             print(f"Error transcribing audio: {e}")
             return None
     
-    def append_to_google_doc(self, video_info, hebrew_text):
-        """Append transcription to Google Doc"""
-        if not self.docs_service:
-            print("Google Docs service not available")
-            return False
+    def save_transcription(self, video_info, hebrew_text):
+        """Save transcription to document file"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        try:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # Limit text to ~500 words
-            words = hebrew_text.split()
-            if len(words) > 500:
-                hebrew_text = ' '.join(words[:500]) + "..."
-            
-            # Format the content
-            content = f"""
+        entry = f"""
 {'='*50}
-תאריך: {timestamp}
-כותרת הסרטון: {video_info['title']}
-קישור: {video_info['url']}
-תאריך פרסום: {video_info['published']}
+Date: {timestamp}
+Video: {video_info['title']}
+URL: {video_info['url']}
+Published: {video_info['published']}
 {'='*50}
-תמלול בעברית:
+Hebrew Transcription:
 {hebrew_text}
 
 """
-            
-            # Get current document to append at the end
-            document = self.docs_service.documents().get(documentId=GOOGLE_DOC_ID).execute()
-            content_length = len(document.get('body').get('content'))
-            
-            # Insert text at the end
-            requests_body = [{
-                'insertText': {
-                    'location': {
-                        'index': content_length - 1  # Insert before last element
-                    },
-                    'text': content
-                }
-            }]
-            
-            self.docs_service.documents().batchUpdate(
-                documentId=GOOGLE_DOC_ID,
-                body={'requests': requests_body}
-            ).execute()
-            
-            print(f"Successfully added transcription to Google Doc")
-            return True
-            
-        except Exception as e:
-            print(f"Error appending to Google Doc: {e}")
-            return False
-    
-    def cleanup_temp_file(self, file_path):
-        """Remove temporary file and its directory"""
+        
         try:
-            if file_path and os.path.exists(file_path):
-                os.remove(file_path)
-                # Remove the temp directory too
-                temp_dir = os.path.dirname(file_path)
-                os.rmdir(temp_dir)
-        except:
-            pass
+            with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
+                f.write(entry)
+            print(f"Transcription saved to {OUTPUT_FILE}")
+        except Exception as e:
+            print(f"Error saving transcription: {e}")
+    
+    def cleanup_temp_files(self):
+        """Remove temporary audio files"""
+        for ext in ['wav', 'mp3', 'm4a', 'webm']:
+            temp_file = f"temp_audio.{ext}"
+            if Path(temp_file).exists():
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
     
     def process_new_videos(self):
         """Main processing function"""
-        print(f"Checking for new Hebrew videos at {datetime.now()}")
+        print(f"Checking for new videos at {datetime.now()}")
         
         videos = self.get_recent_videos()
         if not videos:
             print("No new short videos found")
-            self.save_last_check_time_to_github()  # Update timestamp even if no videos
             return
         
         print(f"Found {len(videos)} new short video(s)")
@@ -317,37 +227,70 @@ class CloudYouTubeTranscriptionBot:
         for video in videos:
             print(f"Processing: {video['title']}")
             
-            # Download audio to temp file
-            audio_file = self.download_audio_to_temp(video['url'])
+            # Download audio
+            audio_file = self.download_audio(video['url'])
             if not audio_file:
                 print(f"Failed to download audio for {video['title']}")
                 continue
             
-            # Transcribe Hebrew audio
-            hebrew_text = self.transcribe_hebrew_audio(audio_file)
+            # Transcribe to Hebrew
+            hebrew_text = self.transcribe_to_hebrew(audio_file)
             if not hebrew_text:
                 print(f"Failed to transcribe {video['title']}")
-                self.cleanup_temp_file(audio_file)
                 continue
             
-            # Append to Google Doc
-            success = self.append_to_google_doc(video, hebrew_text)
-            if success:
-                print(f"Successfully processed: {video['title']}")
-            else:
-                print(f"Failed to save transcription for: {video['title']}")
+            # Limit text to ~500 words
+            words = hebrew_text.split()
+            if len(words) > 500:
+                hebrew_text = ' '.join(words[:500]) + "..."
             
-            # Cleanup temp file
-            self.cleanup_temp_file(audio_file)
+            # Save transcription
+            self.save_transcription(video, hebrew_text)
+            
+            # Cleanup
+            self.cleanup_temp_files()
+            
+            print(f"Successfully processed: {video['title']}")
         
         # Update last check time
-        self.save_last_check_time_to_github()
+        self.save_last_check_time()
         print("Processing complete")
 
-def main():
-    """Main function to run the bot"""
-    bot = CloudYouTubeTranscriptionBot()
+def run_bot():
+    """Run the bot once"""
+    bot = YouTubeTranscriptionBot()
     bot.process_new_videos()
 
+def schedule_daily_run():
+    """Schedule the bot to run daily at specified time"""
+    # Schedule for 9:00 AM daily (change as needed)
+    schedule.every().day.at("09:00").do(run_bot)
+    
+    print("Bot scheduled to run daily at 9:00 AM")
+    print("Press Ctrl+C to stop")
+    
+    while True:
+        schedule.run_pending()
+        time.sleep(60)  # Check every minute
+
 if __name__ == "__main__":
-    main()
+    # Install required packages:
+    print("""
+    Required installations:
+    pip install yt-dlp openai-whisper googletrans==4.0.0-rc1 schedule requests
+    
+    Setup steps:
+    1. Get free YouTube API key from Google Cloud Console
+    2. Set environment variable: export YOUTUBE_API_KEY="your_api_key"
+    3. Replace CHANNEL_ID with target channel ID
+    4. Run script
+    """)
+    
+    # Choose run mode
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "once":
+        # Run once for testing
+        run_bot()
+    else:
+        # Run on schedule
+        schedule_daily_run()
