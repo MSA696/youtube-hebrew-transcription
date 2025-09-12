@@ -2,8 +2,23 @@ name: YouTube Hebrew Transcription Bot
 
 on:
   schedule:
-    - cron: '0 9 * * *'   # Run daily at 9:00 AM UTC
-  workflow_dispatch:    # Allow manual triggering
+    - cron: '0 9 * * *'    # Run daily at 9:00 AM UTC
+  workflow_dispatch:      # Allow manual triggering
+    inputs:
+      mode:
+        description: 'Run mode'
+        required: false
+        default: 'normal'
+        type: choice
+        options:
+        - normal
+        - retry
+        - reset
+      days_back:
+        description: 'Days back to retry (for retry mode)'
+        required: false
+        default: '7'
+        type: string
 
 jobs:
   transcribe:
@@ -45,4 +60,14 @@ jobs:
         GITHUB_REPOSITORY: ${{ github.repository }}
         YOUTUBE_COOKIES_BROWSER: ${{ secrets.YOUTUBE_COOKIES_BROWSER }}
         YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-      run: python transcription_bot.py
+      run: |
+        MODE="${{ github.event.inputs.mode || 'normal' }}"
+        DAYS="${{ github.event.inputs.days_back || '7' }}"
+        
+        if [ "$MODE" = "retry" ]; then
+          python transcription_bot.py retry $DAYS
+        elif [ "$MODE" = "reset" ]; then
+          python transcription_bot.py reset
+        else
+          python transcription_bot.py
+        fi
