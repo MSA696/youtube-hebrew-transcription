@@ -2,8 +2,8 @@ name: YouTube Hebrew Transcription Bot
 
 on:
   schedule:
-    - cron: '0 9 * * *'  # Run daily at 9:00 AM UTC
-  workflow_dispatch:  # Allow manual triggering
+    - cron: '0 9 * * *'   # Run daily at 9:00 AM UTC
+  workflow_dispatch:    # Allow manual triggering
 
 jobs:
   transcribe:
@@ -27,7 +27,13 @@ jobs:
     
     - name: Install Python dependencies
       run: |
-        pip install yt-dlp openai-whisper google-api-python-client google-auth requests
+        pip install yt-dlp openai-whisper google-api-python-client google-auth requests browser_cookie3
+    
+    - name: Setup cookies if provided
+      run: |
+        if [ ! -z "${{ secrets.YOUTUBE_COOKIES_B64 }}" ]; then
+          echo "${{ secrets.YOUTUBE_COOKIES_B64 }}" | base64 -d > cookies.txt
+        fi
     
     - name: Run transcription bot
       env:
@@ -37,4 +43,6 @@ jobs:
         GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GITHUB_REPOSITORY: ${{ github.repository }}
+        YOUTUBE_COOKIES_BROWSER: ${{ secrets.YOUTUBE_COOKIES_BROWSER }}
+        YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
       run: python transcription_bot.py
